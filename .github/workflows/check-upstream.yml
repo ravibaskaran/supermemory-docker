@@ -1,0 +1,116 @@
+name: check-upstream
+
+on:
+  schedule:
+    # Hourly at ~17 minutes past the hour
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  check-and-upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read current version
+        id: cur
+        run: echo "version=$(cat .supermemory-version | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch latest upstream version
+        id: upstream
+        run: |
+          set -euo pipefail
+          # Get the latest release tag (e.g. "server-v0.0.3") and strip the prefix
+          TAG=$(curl -fsSL \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/supermemoryai/supermemory/releases/latest" \
+            | jq -r '.tag_name')
+          echo "Raw upstream tag: $TAG" >&2
+          if [[ ! "$TAG" =~ ^server-v([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?)$ ]]; then
+            echo "Upstream tag does not match server-v*.*.* pattern: $TAG" >&2
+            # Fall back to listing releases and grabbing the latest server-v* tag
+            TAG=$(curl -fsSL \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/supermemoryai/supermemory/releases?per_page=20" \
+              | jq -r '.[].tag_name' | grep -E '^server-v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+            echo "Fallback picked: $TAG" >&2
+          fi
+          VERSION="${TAG#server-v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Compare
+        id: cmp
+        run: |
+          cur="${{ steps.cur.outputs.version }}"
+          new="${{ steps.upstream.outputs.version }}"
+          echo "Current: $cur | Upstream: $new"
+          if [ "$cur" = "$new" ]; then
+            echo "bump=no" >> "$GITHUB_OUTPUT"
+            echo "No new upstream version."
+          else
+            echo "bump=yes" >> "$GITHUB_OUTPUT"
+            echo "New upstream version detected: $new (was $cur)"
+          fi
+
+      - name: Bump version file
+        if: steps.cmp.outputs.bump == 'yes'
+        run: |
+          printf '%s\n' "${{ steps.upstream.outputs.version }}" > .supermemory-version
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .supermemory-version
+          git commit -m "chore: bump supermemory to ${{ steps.upstream.outputs.version }}"
+          git push
+
+      - name: Trigger build workflow
+        if: steps.cmp.outputs.bump == 'yes'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run build.yml \
+            --ref "${{ github.ref_name }}" \
+            || (echo "workflow_dispatch failed; the push to main will still trigger build.yml" >&2; true)
+          # Give the workflow runner a moment to register
+          sleep 5
+
+      - name: Wait for build workflow to complete
+        if: steps.cmp.outputs.bump == 'yes'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          sleep 10
+          RUN_ID=$(gh run list \
+            --workflow=build.yml \
+            --branch="${{ github.ref_name }}" \
+            --limit=1 \
+            --json databaseId,status,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[0].databaseId')
+          echo "Watching build run: $RUN_ID"
+          gh run watch "$RUN_ID" --exit-status \
+            || (echo "Build failed — skipping Coolify restart." >&2; exit 1)
+
+      - name: Notify Coolify to pull latest and restart
+        if: steps.cmp.outputs.bump == 'yes'
+        env:
+          COOLIFY_DEPLOY_TOKEN: ${{ secrets.COOLIFY_DEPLOY_TOKEN }}
+          COOLIFY_SERVICE_UUID: ${{ secrets.COOLIFY_SERVICE_UUID }}
+        run: |
+          set -euo pipefail
+          if [ -z "$COOLIFY_DEPLOY_TOKEN" ] || [ -z "$COOLIFY_SERVICE_UUID" ]; then
+            echo "Missing Coolify secrets — set COOLIFY_DEPLOY_TOKEN and COOLIFY_SERVICE_UUID in repo secrets." >&2
+            exit 1
+          fi
+          curl -fsS -X POST \
+            "https://coolify.justoinfo.com/api/v1/services/${COOLIFY_SERVICE_UUID}/restart?latest=true" \
+            -H "Authorization: Bearer ${COOLIFY_DEPLOY_TOKEN}" \
+            -H "Accept: application/json" \
+            --max-time 60
+          echo "Coolify rolling restart triggered."

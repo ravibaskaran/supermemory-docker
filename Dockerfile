@@ -8,7 +8,7 @@
 #   SUPERMEMORY_VERSION  Upstream version (without 'server-v' prefix). Default: 0.0.3
 #
 # Registry: ghcr.io/ravibaskaran/supermemory-server
-# Target arch: linux/arm64 (OCI Ampere A1)
+# Target archs: linux/amd64 + linux/arm64 (multi-arch manifest)
 FROM debian:bookworm-slim
 
 ARG SUPERMEMORY_VERSION=0.0.3

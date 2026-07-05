@@ -9,16 +9,17 @@ Upstream Supermemory ships a single precompiled binary (`supermemory-server`) �
 `ghcr.io/ravibaskaran/supermemory-server:latest` (also tagged `:v${VERSION}` per release)
 
 - Base: `debian:bookworm-slim`
+- Architectures: `linux/amd64` + `linux/arm64` (multi-arch manifest)
 - Entrypoint: `tini -- /usr/local/bin/supermemory-server`
 - Listens on `:6767`
 - Data volume: `/data`
-- The binary is downloaded and sha256-verified at build time
+- The binary is downloaded and sha256-verified at build time (per arch)
 
 ## Auto-upgrade pipeline
 
 Two GitHub Actions workflows:
 
-- **`build.yml`** — on push to `main` or `workflow_dispatch`. Builds `linux/arm64`, pushes to GHCR with `:latest` and `:v${SUPERMEMORY_VERSION}` tags.
+- **`build.yml`** — on push to `main` or `workflow_dispatch`. Builds `linux/amd64` + `linux/arm64` (multi-arch), pushes to GHCR with `:latest` and `:v${SUPERMEMORY_VERSION}` tags.
 - **`check-upstream.yml`** — hourly cron. Polls the upstream supermemory release, bumps `.supermemory-version` if newer, triggers a rebuild, then calls Coolify's `/services/{uuid}/restart?latest=true` endpoint via deploy-scope token to perform a rolling upgrade.
 
 ## Required GitHub Actions secrets
